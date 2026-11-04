@@ -35,6 +35,14 @@ if __name__ == "__main__":
         "--saved_model", type=str, default="test", help="model id"
     )
     parser.add_argument(
+        "--resume_checkpoint", type=str, default="",
+        help="model state_dict to resume classification training from",
+    )
+    parser.add_argument(
+        "--resume_epoch", type=int, default=0,
+        help="zero-based epoch index to start from when resuming (36 means continue at epoch 37)",
+    )
+    parser.add_argument(
         "--model",
         type=str,
         required=True,

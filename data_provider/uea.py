@@ -191,6 +191,12 @@ def normalize_batch_ts(batch):
     Returns:
         A batch of processed time-series.
     """
-    return np.array(
-        list(map(normalize_ts, batch))
-    )
+    if batch.size == 0:
+        return batch
+    # StandardScaler is applied independently to every sample across time. Doing
+    # the same reductions in one NumPy operation avoids one sklearn object per ECG.
+    batch64 = batch.astype(np.float64, copy=False)
+    mean = batch64.mean(axis=1, keepdims=True)
+    scale = batch64.std(axis=1, keepdims=True)
+    scale[scale == 0] = 1.0
+    return ((batch64 - mean) / scale).astype(batch.dtype, copy=False)

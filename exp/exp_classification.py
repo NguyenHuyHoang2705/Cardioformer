@@ -162,7 +162,22 @@ class Exp_Classification(Exp_Basic):
         model_optim = self._select_optimizer()
         criterion = self._select_criterion()
 
-        for epoch in range(self.args.train_epochs):
+        start_epoch = 0
+        if self.args.resume_checkpoint:
+            checkpoint = torch.load(self.args.resume_checkpoint, map_location="cpu")
+            if not isinstance(checkpoint, dict):
+                raise TypeError("Resume checkpoint must contain a model state_dict.")
+
+            # Load the complete model state. A partial load can silently leave
+            # randomly initialized layers in place and invalidate resumed training.
+            self.model.load_state_dict(checkpoint, strict=True)
+            start_epoch = self.args.resume_epoch
+            print(
+                f"Resumed model weights from {self.args.resume_checkpoint}; "
+                f"continuing at epoch {start_epoch + 1}. Optimizer state starts fresh."
+            )
+
+        for epoch in range(start_epoch, self.args.train_epochs):
             iter_count = 0
             train_loss = []
 
@@ -235,7 +250,7 @@ class Exp_Classification(Exp_Basic):
                 self.swa_model if self.swa else self.model,
                 path,
             )
-            if early_stopping.early_stop:
+            if early_stopping.early_stop and not self.args.resume_checkpoint:
                 print("Early stopping")
                 break
             """if (epoch + 1) % 5 == 0:

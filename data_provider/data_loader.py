@@ -110,9 +110,12 @@ class PTBLoader(Dataset):
             # print("all ids:", ids)
             print("all ids len:", len(ids))
 
-        for j in range(len(filenames)):
+        selected_ids = set(ids)
+        for j, filename in enumerate(filenames):
+            if j + 1 not in selected_ids:
+                continue
             trial_label = subject_label[j]
-            path = data_path + filenames[j]
+            path = os.path.join(data_path, filename)
             subject_feature = np.load(path)
             for trial_feature in subject_feature:
                 # load data by ids
@@ -245,9 +248,12 @@ class PTBXLLoader(Dataset):
             # print("all ids:", ids)
             print("all ids len:", len(ids))
 
-        for j in range(len(filenames)):
+        ids = set(ids)
+        for j, filename in enumerate(filenames):
+            if j + 1 not in ids:
+                continue
             trial_label = subject_label[j]
-            path = data_path + filenames[j]
+            path = os.path.join(data_path, filename)
             # print("path ", path)
             subject_feature = np.load(path)
             # print("data loader shape ",subject_feature.shape)
