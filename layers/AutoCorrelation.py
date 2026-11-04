@@ -76,7 +76,7 @@ class AutoCorrelation(nn.Module):
             .unsqueeze(0)
             .unsqueeze(0)
             .repeat(batch, head, channel, 1)
-            .cuda()
+            .to(values.device)
         )
         # find top k
         top_k = int(self.factor * math.log(length))
@@ -116,7 +116,7 @@ class AutoCorrelation(nn.Module):
             .unsqueeze(0)
             .unsqueeze(0)
             .repeat(batch, head, channel, 1)
-            .cuda()
+            .to(values.device)
         )
         # find top k
         top_k = int(self.factor * math.log(length))
