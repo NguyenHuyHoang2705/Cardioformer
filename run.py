@@ -149,7 +149,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--stride", type=int, default=8, help="stride used in PatchTST")
     parser.add_argument(
-        "--sampling_rate", type=int, default=256, help="frequency sampling rate"
+        "--sampling_rate", type=int, default=500, help="frequency sampling rate"
     )
     parser.add_argument(
         "--patch_len_list",

@@ -10,12 +10,17 @@ import time
 import warnings
 import numpy as np
 import random
+import csv
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 from sklearn.metrics import accuracy_score
 from sklearn.metrics import precision_score
 from sklearn.metrics import recall_score
 from sklearn.metrics import f1_score
 from sklearn.metrics import roc_auc_score
 from sklearn.metrics import average_precision_score
+from sklearn.metrics import confusion_matrix
 
 warnings.filterwarnings("ignore")
 
@@ -36,7 +41,11 @@ class Exp_Classification(Exp_Basic):
         # self.args.enc_in = train_data.feature_df.shape[1]
         # self.args.num_class = len(train_data.class_names)
         self.args.enc_in = test_data.X.shape[2]  # redefine enc_in
-        self.args.num_class = len(np.unique(test_data.y))
+        if self.args.data == "PTB-XL":
+            label_path = os.path.join(self.args.root_path, "Label", "label.npy")
+            self.args.num_class = int(np.max(np.load(label_path)[:, 0])) + 1
+        else:
+            self.args.num_class = len(np.unique(test_data.y))
         # model init
         model = (
             self.model_dict[self.args.model].Model(self.args).float()
@@ -87,13 +96,11 @@ class Exp_Classification(Exp_Basic):
                 preds.append(outputs.detach())
                 trues.append(label)
 
-        total_loss = np.average(total_loss)
+        total_loss = float(torch.stack(total_loss).mean().item()) if total_loss else float("nan")
 
         preds = torch.cat(preds, 0)
         trues = torch.cat(trues, 0)
-        probs = torch.nn.functional.softmax(
-            preds
-        )  # (total_samples, num_classes) est. prob. for each class and sample
+        probs = torch.nn.functional.softmax(preds, dim=1)
         trues_onehot = (
             torch.nn.functional.one_hot(
                 trues.reshape(
@@ -111,13 +118,28 @@ class Exp_Classification(Exp_Basic):
         )  # (total_samples,) int class index for each sample
         probs = probs.cpu().numpy()
         trues = trues.flatten().cpu().numpy()
+        cm = confusion_matrix(
+            trues, predictions, labels=np.arange(self.args.num_class)
+        )
+        true_positives = np.diag(cm)
+        false_positives = cm.sum(axis=0) - true_positives
+        false_negatives = cm.sum(axis=1) - true_positives
+        true_negatives = cm.sum() - (
+            true_positives + false_positives + false_negatives
+        )
+        specificity_per_class = np.divide(
+            true_negatives, true_negatives + false_positives,
+            out=np.full_like(true_negatives, np.nan, dtype=float),
+            where=(true_negatives + false_positives) != 0,
+        )
         # accuracy = cal_accuracy(predictions, trues)
         metrics_dict = {
             "Accuracy": accuracy_score(trues, predictions),
-            "Precision": precision_score(trues, predictions, average="macro"),
-            "Recall": recall_score(trues, predictions, average="macro"),
-            "F1": f1_score(trues, predictions, average="macro"),
-            "AUROC": roc_auc_score(trues_onehot, probs, multi_class="ovr"),
+            "Precision": precision_score(trues, predictions, labels=np.arange(self.args.num_class), average="macro", zero_division=0),
+            "Recall": recall_score(trues, predictions, labels=np.arange(self.args.num_class), average="macro", zero_division=0),
+            "F1": f1_score(trues, predictions, labels=np.arange(self.args.num_class), average="macro", zero_division=0),
+            "Specificity": float(np.nanmean(specificity_per_class)),
+            "AUROC": self._safe_macro_auc(trues_onehot, probs),
             "AUPRC": average_precision_score(trues_onehot, probs, average="macro"),
         }
 
@@ -127,16 +149,40 @@ class Exp_Classification(Exp_Basic):
             self.model.train()
         return total_loss, metrics_dict
 
+    def _safe_macro_auc(self, onehot, probs):
+        values = [roc_auc_score(onehot[:, i], probs[:, i]) for i in range(self.args.num_class)
+                  if np.unique(onehot[:, i]).size == 2]
+        return float(np.mean(values)) if values else float("nan")
+
+    @staticmethod
+    def _save_history(history, folder):
+        if not history:
+            return
+        with open(os.path.join(folder, "epoch_metrics.csv"), "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=list(history[0]))
+            writer.writeheader()
+            writer.writerows(history)
+        metrics = ["Loss", "AUROC", "AUPRC", "F1", "Recall", "Specificity"]
+        fig, axes = plt.subplots(2, 3, figsize=(15, 8))
+        epochs = [row["Epoch"] for row in history]
+        for ax, metric in zip(axes.flat, metrics):
+            for split, color in (("Train", "tab:blue"), ("Validation", "tab:orange")):
+                ax.plot(epochs, [row[f"{split}_{metric}"] for row in history], marker="o", label=split, color=color)
+            ax.set_title(metric)
+            ax.set_xlabel("Epoch")
+            ax.grid(True, alpha=0.3)
+            ax.legend()
+        fig.tight_layout()
+        fig.savefig(os.path.join(folder, "training_curves.png"), dpi=160)
+        plt.close(fig)
+
     def train(self, setting):
         train_data, train_loader = self._get_data(flag="TRAIN")
         vali_data, vali_loader = self._get_data(flag="VAL")
-        test_data, test_loader = self._get_data(flag="TEST")
         print(train_data.X.shape)
         print(train_data.y.shape)
         print(vali_data.X.shape)
         print(vali_data.y.shape)
-        print(test_data.X.shape)
-        print(test_data.y.shape)
 
         path = (
             "./checkpoints/"
@@ -163,6 +209,7 @@ class Exp_Classification(Exp_Basic):
         criterion = self._select_criterion()
 
         start_epoch = 0
+        history = []
         if self.args.resume_checkpoint:
             checkpoint = torch.load(self.args.resume_checkpoint, map_location="cpu")
             if not isinstance(checkpoint, dict):
@@ -225,25 +272,22 @@ class Exp_Classification(Exp_Basic):
 
             print("Epoch: {} cost time: {}".format(epoch + 1, time.time() - epoch_time))
             train_loss = np.average(train_loss)
+            train_eval_loss, train_metrics_dict = self.vali(train_data, train_loader, criterion)
             vali_loss, val_metrics_dict = self.vali(vali_data, vali_loader, criterion)
-            test_loss, test_metrics_dict = self.vali(test_data, test_loader, criterion)
+            row = {"Epoch": epoch + 1, "Train_Loss": float(train_eval_loss), "Validation_Loss": float(vali_loss)}
+            for split, values in (("Train", train_metrics_dict), ("Validation", val_metrics_dict)):
+                for key in ("AUROC", "AUPRC", "F1", "Recall", "Specificity"):
+                    row[f"{split}_{key}"] = float(values[key])
+            history.append(row)
+            self._save_history(history, path)
 
             print(
-                f"Epoch: {epoch + 1}, Steps: {train_steps}, | Train Loss: {train_loss:.5f}\n"
-                f"Validation results --- Loss: {vali_loss:.5f}, "
-                f"Accuracy: {val_metrics_dict['Accuracy']:.5f}, "
-                f"Precision: {val_metrics_dict['Precision']:.5f}, "
-                f"Recall: {val_metrics_dict['Recall']:.5f}, "
-                f"F1: {val_metrics_dict['F1']:.5f}, "
-                f"AUROC: {val_metrics_dict['AUROC']:.5f}, "
-                f"AUPRC: {val_metrics_dict['AUPRC']:.5f}\n"
-                f"Test results --- Loss: {test_loss:.5f}, "
-                f"Accuracy: {test_metrics_dict['Accuracy']:.5f}, "
-                f"Precision: {test_metrics_dict['Precision']:.5f}, "
-                f"Recall: {test_metrics_dict['Recall']:.5f} "
-                f"F1: {test_metrics_dict['F1']:.5f}, "
-                f"AUROC: {test_metrics_dict['AUROC']:.5f}, "
-                f"AUPRC: {test_metrics_dict['AUPRC']:.5f}\n"
+                f"Train --- Loss: {train_eval_loss:.5f}, Macro-AUROC: {train_metrics_dict['AUROC']:.5f}, "
+                f"Macro-AUPRC: {train_metrics_dict['AUPRC']:.5f}, Macro-F1: {train_metrics_dict['F1']:.5f}, "
+                f"Macro-Recall: {train_metrics_dict['Recall']:.5f}, Macro-Specificity: {train_metrics_dict['Specificity']:.5f}\n"
+                f"Validation --- Loss: {vali_loss:.5f}, Macro-AUROC: {val_metrics_dict['AUROC']:.5f}, "
+                f"Macro-AUPRC: {val_metrics_dict['AUPRC']:.5f}, Macro-F1: {val_metrics_dict['F1']:.5f}, "
+                f"Macro-Recall: {val_metrics_dict['Recall']:.5f}, Macro-Specificity: {val_metrics_dict['Specificity']:.5f}"
             )
             early_stopping(
                 -val_metrics_dict["F1"],
@@ -310,17 +354,19 @@ class Exp_Classification(Exp_Basic):
             f"Validation results --- Loss: {vali_loss:.5f}, "
             f"Accuracy: {val_metrics_dict['Accuracy']:.5f}, "
             f"Precision: {val_metrics_dict['Precision']:.5f}, "
-            f"Recall: {val_metrics_dict['Recall']:.5f}, "
-            f"F1: {val_metrics_dict['F1']:.5f}, "
-            f"AUROC: {val_metrics_dict['AUROC']:.5f}, "
-            f"AUPRC: {val_metrics_dict['AUPRC']:.5f}\n"
+            f"Macro-Recall: {val_metrics_dict['Recall']:.5f}, "
+            f"Macro-F1: {val_metrics_dict['F1']:.5f}, "
+            f"Macro-Specificity: {val_metrics_dict['Specificity']:.5f}, "
+            f"Macro-AUROC: {val_metrics_dict['AUROC']:.5f}, "
+            f"Macro-AUPRC: {val_metrics_dict['AUPRC']:.5f}\n"
             f"Test results --- Loss: {test_loss:.5f}, "
             f"Accuracy: {test_metrics_dict['Accuracy']:.5f}, "
             f"Precision: {test_metrics_dict['Precision']:.5f}, "
-            f"Recall: {test_metrics_dict['Recall']:.5f}, "
-            f"F1: {test_metrics_dict['F1']:.5f}, "
-            f"AUROC: {test_metrics_dict['AUROC']:.5f}, "
-            f"AUPRC: {test_metrics_dict['AUPRC']:.5f}\n"
+            f"Macro-Recall: {test_metrics_dict['Recall']:.5f}, "
+            f"Macro-F1: {test_metrics_dict['F1']:.5f}, "
+            f"Macro-Specificity: {test_metrics_dict['Specificity']:.5f}, "
+            f"Macro-AUROC: {test_metrics_dict['AUROC']:.5f}, "
+            f"Macro-AUPRC: {test_metrics_dict['AUPRC']:.5f}\n"
         )
         file_name = "result_classification.txt"
         f = open(os.path.join(folder_path, file_name), "a")
@@ -329,17 +375,19 @@ class Exp_Classification(Exp_Basic):
             f"Validation results --- Loss: {vali_loss:.5f}, "
             f"Accuracy: {val_metrics_dict['Accuracy']:.5f}, "
             f"Precision: {val_metrics_dict['Precision']:.5f}, "
-            f"Recall: {val_metrics_dict['Recall']:.5f}, "
-            f"F1: {val_metrics_dict['F1']:.5f}, "
-            f"AUROC: {val_metrics_dict['AUROC']:.5f}, "
-            f"AUPRC: {val_metrics_dict['AUPRC']:.5f}\n"
+            f"Macro-Recall: {val_metrics_dict['Recall']:.5f}, "
+            f"Macro-F1: {val_metrics_dict['F1']:.5f}, "
+            f"Macro-Specificity: {val_metrics_dict['Specificity']:.5f}, "
+            f"Macro-AUROC: {val_metrics_dict['AUROC']:.5f}, "
+            f"Macro-AUPRC: {val_metrics_dict['AUPRC']:.5f}\n"
             f"Test results --- Loss: {test_loss:.5f}, "
             f"Accuracy: {test_metrics_dict['Accuracy']:.5f}, "
             f"Precision: {test_metrics_dict['Precision']:.5f}, "
-            f"Recall: {test_metrics_dict['Recall']:.5f}, "
-            f"F1: {test_metrics_dict['F1']:.5f}, "
-            f"AUROC: {test_metrics_dict['AUROC']:.5f}, "
-            f"AUPRC: {test_metrics_dict['AUPRC']:.5f}\n"
+            f"Macro-Recall: {test_metrics_dict['Recall']:.5f}, "
+            f"Macro-F1: {test_metrics_dict['F1']:.5f}, "
+            f"Macro-Specificity: {test_metrics_dict['Specificity']:.5f}, "
+            f"Macro-AUROC: {test_metrics_dict['AUROC']:.5f}, "
+            f"Macro-AUPRC: {test_metrics_dict['AUPRC']:.5f}\n"
         )
         f.write("\n")
         f.write("\n")
@@ -412,17 +460,19 @@ class Exp_Classification(Exp_Basic):
             f"Validation results --- Loss: {vali_loss:.5f}, "
             f"Accuracy: {val_metrics_dict['Accuracy']:.5f}, "
             f"Precision: {val_metrics_dict['Precision']:.5f}, "
-            f"Recall: {val_metrics_dict['Recall']:.5f}, "
-            f"F1: {val_metrics_dict['F1']:.5f}, "
-            f"AUROC: {val_metrics_dict['AUROC']:.5f}, "
-            f"AUPRC: {val_metrics_dict['AUPRC']:.5f}\n"
+            f"Macro-Recall: {val_metrics_dict['Recall']:.5f}, "
+            f"Macro-F1: {val_metrics_dict['F1']:.5f}, "
+            f"Macro-Specificity: {val_metrics_dict['Specificity']:.5f}, "
+            f"Macro-AUROC: {val_metrics_dict['AUROC']:.5f}, "
+            f"Macro-AUPRC: {val_metrics_dict['AUPRC']:.5f}\n"
             f"Test results --- Loss: {test_loss:.5f}, "
             f"Accuracy: {test_metrics_dict['Accuracy']:.5f}, "
             f"Precision: {test_metrics_dict['Precision']:.5f}, "
-            f"Recall: {test_metrics_dict['Recall']:.5f}, "
-            f"F1: {test_metrics_dict['F1']:.5f}, "
-            f"AUROC: {test_metrics_dict['AUROC']:.5f}, "
-            f"AUPRC: {test_metrics_dict['AUPRC']:.5f}\n"
+            f"Macro-Recall: {test_metrics_dict['Recall']:.5f}, "
+            f"Macro-F1: {test_metrics_dict['F1']:.5f}, "
+            f"Macro-Specificity: {test_metrics_dict['Specificity']:.5f}, "
+            f"Macro-AUROC: {test_metrics_dict['AUROC']:.5f}, "
+            f"Macro-AUPRC: {test_metrics_dict['AUPRC']:.5f}\n"
         )
         file_name = "result_classification.txt"
         f = open(os.path.join(folder_path, file_name), "a")
@@ -431,17 +481,19 @@ class Exp_Classification(Exp_Basic):
             f"Validation results --- Loss: {vali_loss:.5f}, "
             f"Accuracy: {val_metrics_dict['Accuracy']:.5f}, "
             f"Precision: {val_metrics_dict['Precision']:.5f}, "
-            f"Recall: {val_metrics_dict['Recall']:.5f}, "
-            f"F1: {val_metrics_dict['F1']:.5f}, "
-            f"AUROC: {val_metrics_dict['AUROC']:.5f}, "
-            f"AUPRC: {val_metrics_dict['AUPRC']:.5f}\n"
+            f"Macro-Recall: {val_metrics_dict['Recall']:.5f}, "
+            f"Macro-F1: {val_metrics_dict['F1']:.5f}, "
+            f"Macro-Specificity: {val_metrics_dict['Specificity']:.5f}, "
+            f"Macro-AUROC: {val_metrics_dict['AUROC']:.5f}, "
+            f"Macro-AUPRC: {val_metrics_dict['AUPRC']:.5f}\n"
             f"Test results --- Loss: {test_loss:.5f}, "
             f"Accuracy: {test_metrics_dict['Accuracy']:.5f}, "
             f"Precision: {test_metrics_dict['Precision']:.5f}, "
-            f"Recall: {test_metrics_dict['Recall']:.5f}, "
-            f"F1: {test_metrics_dict['F1']:.5f}, "
-            f"AUROC: {test_metrics_dict['AUROC']:.5f}, "
-            f"AUPRC: {test_metrics_dict['AUPRC']:.5f}\n"
+            f"Macro-Recall: {test_metrics_dict['Recall']:.5f}, "
+            f"Macro-F1: {test_metrics_dict['F1']:.5f}, "
+            f"Macro-Specificity: {test_metrics_dict['Specificity']:.5f}, "
+            f"Macro-AUROC: {test_metrics_dict['AUROC']:.5f}, "
+            f"Macro-AUPRC: {test_metrics_dict['AUPRC']:.5f}\n"
         )
         f.write("\n")
         f.write("\n")

@@ -144,13 +144,6 @@ class PTBXLLoader(Dataset):
         self.data_path = os.path.join(root_path, "Feature/")
         self.label_path = os.path.join(root_path, "Label/label.npy")
 
-        a, b = 0.6, 0.8
-
-        # list of IDs for training, val, and test sets
-        self.train_ids, self.val_ids, self.test_ids = self.load_train_val_test_list(
-            self.label_path, a, b
-        )
-
         self.X, self.y = self.load_ptbxl(self.data_path, self.label_path, flag=flag)
 
         # pre_process
@@ -228,45 +221,57 @@ class PTBXLLoader(Dataset):
         filenames = []
         # The first column is the label; the second column is the patient ID
         subject_label = np.load(label_path)
-        for filename in os.listdir(data_path):
-            filenames.append(filename)
-        filenames = natsorted(filenames)
-        if flag == "TRAIN":
-            ids = self.train_ids
-            # print("train ids:", ids)
-            print("train ids len:", len(ids))
-        elif flag == "VAL":
-            ids = self.val_ids
-            # print("val ids:", ids)
-            print("val ids len:", len(ids))
-        elif flag == "TEST":
-            ids = self.test_ids
-            # print("test ids:", ids)
-            print("test ids len:", len(ids))
+        # Preserve folder order when signals are arranged in ten directories.
+        # The preprocessed repo format stores one subject per file in a flat dir;
+        # in that case the same 8:2 rule is applied to sorted subject files.
+        folders = natsorted(
+            name for name in os.listdir(data_path)
+            if os.path.isdir(os.path.join(data_path, name))
+        )
+        grouped_files = []
+        if folders:
+            if len(folders) != 10:
+                raise ValueError(
+                    f"PTB-XL expects exactly 10 signal folders for an 8/2 split; found {len(folders)}."
+                )
+            grouped_files = [
+                [os.path.join(data_path, folder, name) for name in natsorted(os.listdir(os.path.join(data_path, folder)))
+                 if name.lower().endswith(".npy")]
+                for folder in folders
+            ]
+            train_files = [path for group in grouped_files[:8] for path in group]
+            val_files = [path for group in grouped_files[8:] for path in group]
         else:
-            ids = subject_label[:, 1]
-            # print("all ids:", ids)
-            print("all ids len:", len(ids))
+            flat_files = [os.path.join(data_path, name) for name in natsorted(os.listdir(data_path)) if name.lower().endswith(".npy")]
+            if len(flat_files) < 10:
+                raise ValueError("PTB-XL needs at least 10 signal files to create an 8/2 split.")
+            split = int(len(flat_files) * 0.8)
+            train_files, val_files = flat_files[:split], flat_files[split:]
 
-        ids = set(ids)
-        for j, filename in enumerate(filenames):
-            if j + 1 not in ids:
-                continue
-            trial_label = subject_label[j]
-            path = os.path.join(data_path, filename)
-            # print("path ", path)
-            subject_feature = np.load(path)
-            # print("data loader shape ",subject_feature.shape)
+        selected_files = train_files if flag == "TRAIN" else val_files
+        if flag not in ("TRAIN", "VAL", "TEST"):
+            selected_files = train_files + val_files
+        print(f"PTB-XL {flag}: {len(selected_files)} subject files")
+
+        # Labels are stored in the same natural subject order as feature files.
+        if folders:
+            all_files = [path for group in grouped_files for path in group]
+        else:
+            all_files = flat_files
+        label_by_file = {path: i for i, path in enumerate(all_files)}
+        for file_path in selected_files:
+            label_index = label_by_file[file_path]
+            if label_index >= len(subject_label):
+                raise ValueError("PTB-XL feature files and label.npy have different lengths")
+            subject_feature = np.load(file_path)
             for trial_feature in subject_feature:
-                # load data by ids
-                if j + 1 in ids:  # id starts from 1, not 0.
-                    # print('trail shape', trial_feature.shape, " subject feature shape", subject_feature.shape)
-                    feature_list.append(trial_feature)
-                    label_list.append(trial_label)
+                feature_list.append(trial_feature)
+                label_list.append(subject_label[label_index])
         # reshape and shuffle
         X = np.array(feature_list)
         y = np.array(label_list)
-        X, y = shuffle(X, y, random_state=42)
+        if len(y):
+            X, y = shuffle(X, y, random_state=42)
 
         return X, y[:, 0]  # only use the first column (label)
 
